@@ -2,6 +2,6 @@
 
   <p>Basic Game</p>
 
-  <aComming Soonn</a>
+  Comming Soonn</a>
 
 </div>
