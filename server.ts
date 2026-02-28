@@ -1,0 +1,309 @@
+import express from "express";
+import { createServer as createViteServer } from "vite";
+import path from "path";
+import Database from "better-sqlite3";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import cookieParser from "cookie-parser";
+import cors from "cors";
+import axios from "axios";
+import dotenv from "dotenv";
+import { Client, GatewayIntentBits } from "discord.js";
+
+dotenv.config();
+
+const db = new Database("game.db");
+
+// Initialize Database
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT,
+    discord_id TEXT UNIQUE
+  );
+
+  CREATE TABLE IF NOT EXISTS players (
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    gender TEXT,
+    level INTEGER DEFAULT 1,
+    exp INTEGER DEFAULT 0,
+    hp INTEGER DEFAULT 100,
+    max_hp INTEGER DEFAULT 100,
+    gold INTEGER DEFAULT 500,
+    gems INTEGER DEFAULT 50,
+    weapon TEXT DEFAULT 'Wooden Sword',
+    str INTEGER DEFAULT 1,
+    dex INTEGER DEFAULT 1,
+    vit INTEGER DEFAULT 1,
+    stat_points INTEGER DEFAULT 5,
+    last_save DATETIME DEFAULT CURRENT_TIMESTAMP,
+    language TEXT DEFAULT 'EN',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(id) REFERENCES users(id)
+  );
+`);
+
+// Migration: Add last_save column if it doesn't exist
+try {
+  db.prepare("ALTER TABLE players ADD COLUMN last_save DATETIME DEFAULT CURRENT_TIMESTAMP").run();
+} catch (e) {}
+
+// Migration: Add language column if it doesn't exist
+try {
+  db.prepare("ALTER TABLE players ADD COLUMN language TEXT DEFAULT 'EN'").run();
+} catch (e) {}
+
+// Migration: Add created_at column if it doesn't exist
+try {
+  db.prepare("ALTER TABLE players ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP").run();
+} catch (e) {}
+
+// Migration: Update existing players to start at 1 if they were at the old default (10)
+// Or just update everyone to 1 as requested by the user for consistency.
+try {
+  db.prepare("UPDATE players SET str = 1, dex = 1, vit = 1 WHERE str = 10 AND dex = 10 AND vit = 10").run();
+  console.log("Migration: Updated existing players with default stats to 1.");
+} catch (e) {
+  console.error("Migration error:", e);
+}
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+  const JWT_SECRET = process.env.JWT_SECRET || "slayer-secret-key";
+
+  app.use(express.json());
+  app.use(cookieParser());
+  app.use(cors({ origin: true, credentials: true }));
+
+  // Helper: Create Player
+    const createPlayer = (userId: number, name: string, gender: string = 'Male') => {
+    const stmt = db.prepare(`
+      INSERT INTO players (id, name, gender, level, exp, hp, max_hp, gold, gems, weapon, str, dex, vit, stat_points, language, created_at)
+      VALUES (?, ?, ?, 1, 0, 100, 100, 500, 50, 'Wooden Sword', 1, 1, 1, 5, 'EN', CURRENT_TIMESTAMP)
+    `);
+    stmt.run(userId, name, gender);
+  };
+
+  // Discord Bot Initialization
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+
+  if (DISCORD_BOT_TOKEN) {
+    client.once('ready', () => {
+      console.log(`Logged in as ${client.user?.tag}!`);
+    });
+    client.login(DISCORD_BOT_TOKEN).catch(err => {
+      console.error("Discord Bot Login Error:", err);
+    });
+  } else {
+    console.warn("DISCORD_BOT_TOKEN not found. Discord bot will not start.");
+  }
+
+  // Auth Middleware
+  const authenticateToken = (req: any, res: any, next: any) => {
+    const token = req.cookies.token;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+      if (err) return res.status(403).json({ error: "Forbidden" });
+      req.user = user;
+      next();
+    });
+  };
+
+  // --- API ROUTES ---
+
+  // Register
+  app.post("/api/auth/register", async (req, res) => {
+    const { username, password, gender } = req.body;
+    try {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const stmt = db.prepare("INSERT INTO users (username, password) VALUES (?, ?)");
+      const result = stmt.run(username, hashedPassword);
+      const userId = result.lastInsertRowid as number;
+
+      createPlayer(userId, username, gender);
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message.includes("UNIQUE") ? "Username already exists" : "Registration failed" });
+    }
+  });
+
+  // Login
+  app.post("/api/auth/login", async (req, res) => {
+    const { username, password } = req.body;
+    const user: any = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+
+    if (user && user.password && await bcrypt.compare(password, user.password)) {
+      const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "24h" });
+      res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "none" });
+      res.json({ success: true, user: { id: user.id, username: user.username } });
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
+  });
+
+  // Logout
+  app.post("/api/auth/logout", (req, res) => {
+    res.clearCookie("token", { secure: true, sameSite: "none" });
+    res.json({ success: true });
+  });
+
+  // Get Current User/Player
+  app.get("/api/me", authenticateToken, (req: any, res) => {
+    const player = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    if (!player) {
+      // Auto-create if missing (shouldn't happen with normal flow but good for robustness)
+      createPlayer(req.user.id, req.user.username);
+      const newPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+      return res.json({ user: req.user, player: newPlayer });
+    }
+    res.json({ user: req.user, player });
+  });
+
+  // Update Stats (Training)
+  app.post("/api/player/train", authenticateToken, async (req: any, res) => {
+    const { str, dex, vit, pointsSpent } = req.body;
+    const player: any = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+
+    if (!player || player.stat_points < pointsSpent) {
+      return res.status(400).json({ error: "Insufficient stat points" });
+    }
+
+    const newMaxHp = 100 + ((player.vit + vit) * 10);
+    const stmt = db.prepare(`
+      UPDATE players 
+      SET str = str + ?, dex = dex + ?, vit = vit + ?, stat_points = stat_points - ?, max_hp = ?, last_save = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `);
+    stmt.run(str, dex, vit, pointsSpent, newMaxHp, req.user.id);
+
+    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    res.json({ success: true, player: updatedPlayer });
+  });
+
+  // Manual Save
+  app.post("/api/player/save", authenticateToken, (req: any, res) => {
+    db.prepare("UPDATE players SET last_save = CURRENT_TIMESTAMP WHERE id = ?").run(req.user.id);
+    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    res.json({ success: true, player: updatedPlayer });
+  });
+
+  // Update Settings
+  app.post("/api/player/settings", authenticateToken, (req: any, res) => {
+    const { language } = req.body;
+    if (language) {
+      db.prepare("UPDATE players SET language = ? WHERE id = ?").run(language, req.user.id);
+    }
+    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    res.json({ success: true, player: updatedPlayer });
+  });
+
+  // Discord OAuth2 URL
+  app.get("/api/auth/discord/url", (req, res) => {
+    const clientId = process.env.DISCORD_CLIENT_ID;
+    const redirectUri = process.env.DISCORD_REDIRECT_URI || (process.env.APP_URL ? `${process.env.APP_URL}/api/auth/discord/callback` : null);
+    
+    if (!clientId) {
+      console.error("Discord Auth Error: DISCORD_CLIENT_ID is missing");
+      return res.status(400).json({ error: "Discord Client ID is not configured in environment variables." });
+    }
+    if (!redirectUri) {
+      console.error("Discord Auth Error: Redirect URI could not be determined");
+      return res.status(400).json({ error: "Discord Redirect URI is not configured and APP_URL is missing." });
+    }
+
+    const url = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify`;
+    res.json({ url });
+  });
+
+  // Discord Callback
+  app.get("/api/auth/discord/callback", async (req, res) => {
+    const { code } = req.query;
+    if (!code) return res.status(400).send("No code provided");
+
+    const clientId = process.env.DISCORD_CLIENT_ID;
+    const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+    const redirectUri = process.env.DISCORD_REDIRECT_URI || (process.env.APP_URL ? `${process.env.APP_URL}/api/auth/discord/callback` : null);
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      console.error("Discord Callback Error: Missing configuration", { clientId: !!clientId, clientSecret: !!clientSecret, redirectUri: !!redirectUri });
+      return res.status(500).send("Discord configuration is incomplete.");
+    }
+
+    try {
+      // Exchange code for token
+      const tokenResponse = await axios.post("https://discord.com/api/oauth2/token", new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "authorization_code",
+        code: code as string,
+        redirect_uri: redirectUri,
+      }), { headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+
+      const { access_token } = tokenResponse.data;
+
+      // Get user info
+      const userResponse = await axios.get("https://discord.com/api/users/@me", {
+        headers: { Authorization: `Bearer ${access_token}` }
+      });
+
+      const discordUser = userResponse.data;
+      let user: any = db.prepare("SELECT * FROM users WHERE discord_id = ?").get(discordUser.id);
+
+      if (!user) {
+        // Create new user via Discord
+        const stmt = db.prepare("INSERT INTO users (username, discord_id) VALUES (?, ?)");
+        const result = stmt.run(discordUser.username, discordUser.id);
+        user = { id: result.lastInsertRowid, username: discordUser.username };
+        createPlayer(user.id, discordUser.username);
+      }
+
+      const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "24h" });
+      res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "none" });
+
+      res.send(`
+        <html>
+          <body>
+            <script>
+              if (window.opener) {
+                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+                window.close();
+              } else {
+                window.location.href = '/';
+              }
+            </script>
+            <p>Authentication successful. This window should close automatically.</p>
+          </body>
+        </html>
+      `);
+    } catch (error) {
+      console.error("Discord Auth Error:", error);
+      res.status(500).send("Discord authentication failed");
+    }
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, "dist")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();

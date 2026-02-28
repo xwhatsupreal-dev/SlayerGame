@@ -1,0 +1,5 @@
+{
+  "name": "SlayerGame",
+  "description": "A technical RPG dashboard with Discord integration, player stats, and training systems.",
+  "requestFramePermissions": []
+}
