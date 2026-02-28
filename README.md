@@ -1,7 +1,7 @@
 <div align="center">
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+  <p>Basic Game</p>
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+  <aComming Soonn</a>
 
 </div>
