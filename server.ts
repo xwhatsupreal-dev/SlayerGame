@@ -1,7 +1,7 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import Database from "better-sqlite3";
+import pg from "pg";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
@@ -9,146 +9,129 @@ import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
 import { Client, GatewayIntentBits } from "discord.js";
-
 import { fileURLToPath } from "url";
-import fs from "fs";
+
+const { Pool } = pg;
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Database path setup for Railway persistence
-// If RAILWAY_VOLUME_MOUNT_PATH is set (e.g. to /data), use it.
-const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || ".";
-if (dataDir !== "." && !fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-const dbPath = path.join(dataDir, "game.db");
-const db = new Database(dbPath);
-
-// Initialize Database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT,
-    discord_id TEXT UNIQUE
-  );
-
-  CREATE TABLE IF NOT EXISTS players (
-    id INTEGER PRIMARY KEY,
-    name TEXT,
-    gender TEXT,
-    level INTEGER DEFAULT 1,
-    exp INTEGER DEFAULT 0,
-    hp INTEGER DEFAULT 100,
-    max_hp INTEGER DEFAULT 100,
-    gold INTEGER DEFAULT 500,
-    gems INTEGER DEFAULT 50,
-    weapon TEXT DEFAULT 'Wooden Sword',
-    str INTEGER DEFAULT 1,
-    dex INTEGER DEFAULT 1,
-    vit INTEGER DEFAULT 1,
-    stat_points INTEGER DEFAULT 5,
-    last_save DATETIME DEFAULT CURRENT_TIMESTAMP,
-    language TEXT DEFAULT 'EN',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS achievements (
-    id TEXT PRIMARY KEY,
-    title_en TEXT,
-    title_th TEXT,
-    description_en TEXT,
-    description_th TEXT,
-    icon TEXT,
-    requirement_type TEXT,
-    requirement_value INTEGER
-  );
-
-  CREATE TABLE IF NOT EXISTS player_achievements (
-    player_id INTEGER,
-    achievement_id TEXT,
-    unlocked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(player_id, achievement_id),
-    FOREIGN KEY(player_id) REFERENCES players(id),
-    FOREIGN KEY(achievement_id) REFERENCES achievements(id)
-  );
-`);
-
-// Initial Achievements
-const initialAchievements = [
-  {
-    id: 'lvl_5',
-    title_en: 'Novice Slayer',
-    title_th: 'นักล่าฝึกหัด',
-    description_en: 'Reach Level 5',
-    description_th: 'เลเวลถึง 5',
-    icon: 'Sword',
-    requirement_type: 'level',
-    requirement_value: 5
-  },
-  {
-    id: 'str_10',
-    title_en: 'Brute Force',
-    title_th: 'พลังทำลายล้าง',
-    description_en: 'Reach 10 Strength',
-    description_th: 'ความแข็งแกร่งถึง 10',
-    icon: 'Dumbbell',
-    requirement_type: 'str',
-    requirement_value: 10
-  },
-  {
-    id: 'gold_1000',
-    title_en: 'Gold Digger',
-    title_th: 'นักขุดทอง',
-    description_en: 'Collect 1,000 Gold',
-    description_th: 'สะสมทองครบ 1,000',
-    icon: 'Coins',
-    requirement_type: 'gold',
-    requirement_value: 1000
-  }
-];
-
-initialAchievements.forEach(ach => {
-  db.prepare(`
-    INSERT OR IGNORE INTO achievements (id, title_en, title_th, description_en, description_th, icon, requirement_type, requirement_value)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(ach.id, ach.title_en, ach.title_th, ach.description_en, ach.description_th, ach.icon, ach.requirement_type, ach.requirement_value);
+// PostgreSQL Pool setup
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false }
 });
 
-// Migration: Add last_save column if it doesn't exist
-try {
-  db.prepare("ALTER TABLE players ADD COLUMN last_save DATETIME DEFAULT CURRENT_TIMESTAMP").run();
-} catch (e) {}
+// Initialize Database
+async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE,
+        password TEXT,
+        discord_id TEXT UNIQUE
+      );
 
-// Migration: Add language column if it doesn't exist
-try {
-  db.prepare("ALTER TABLE players ADD COLUMN language TEXT DEFAULT 'EN'").run();
-} catch (e) {}
+      CREATE TABLE IF NOT EXISTS players (
+        id INTEGER PRIMARY KEY,
+        name TEXT,
+        gender TEXT,
+        level INTEGER DEFAULT 1,
+        exp INTEGER DEFAULT 0,
+        hp INTEGER DEFAULT 100,
+        max_hp INTEGER DEFAULT 100,
+        gold INTEGER DEFAULT 500,
+        gems INTEGER DEFAULT 50,
+        weapon TEXT DEFAULT 'Wooden Sword',
+        str INTEGER DEFAULT 1,
+        dex INTEGER DEFAULT 1,
+        vit INTEGER DEFAULT 1,
+        stat_points INTEGER DEFAULT 5,
+        last_save TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        language TEXT DEFAULT 'EN',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        theme_color TEXT DEFAULT '#ef4444',
+        CONSTRAINT fk_user FOREIGN KEY(id) REFERENCES users(id)
+      );
 
-// Migration: Add created_at column if it doesn't exist
-try {
-  db.prepare("ALTER TABLE players ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP").run();
-} catch (e) {}
+      CREATE TABLE IF NOT EXISTS achievements (
+        id TEXT PRIMARY KEY,
+        title_en TEXT,
+        title_th TEXT,
+        description_en TEXT,
+        description_th TEXT,
+        icon TEXT,
+        requirement_type TEXT,
+        requirement_value INTEGER
+      );
 
-// Migration: Add theme_color column if it doesn't exist
-try {
-  db.prepare("ALTER TABLE players ADD COLUMN theme_color TEXT DEFAULT '#ef4444'").run();
-} catch (e) {}
+      CREATE TABLE IF NOT EXISTS player_achievements (
+        player_id INTEGER,
+        achievement_id TEXT,
+        unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(player_id, achievement_id),
+        CONSTRAINT fk_player FOREIGN KEY(player_id) REFERENCES players(id),
+        CONSTRAINT fk_achievement FOREIGN KEY(achievement_id) REFERENCES achievements(id)
+      );
+    `);
 
-// Migration: Update existing players to start at 1 if they were at the old default (10)
-// Or just update everyone to 1 as requested by the user for consistency.
-try {
-  db.prepare("UPDATE players SET str = 1, dex = 1, vit = 1 WHERE str = 10 AND dex = 10 AND vit = 10").run();
-  console.log("Migration: Updated existing players with default stats to 1.");
-} catch (e) {
-  console.error("Migration error:", e);
+    // Initial Achievements
+    const initialAchievements = [
+      {
+        id: 'lvl_5',
+        title_en: 'Novice Slayer',
+        title_th: 'นักล่าฝึกหัด',
+        description_en: 'Reach Level 5',
+        description_th: 'เลเวลถึง 5',
+        icon: 'Sword',
+        requirement_type: 'level',
+        requirement_value: 5
+      },
+      {
+        id: 'str_10',
+        title_en: 'Brute Force',
+        title_th: 'พลังทำลายล้าง',
+        description_en: 'Reach 10 Strength',
+        description_th: 'ความแข็งแกร่งถึง 10',
+        icon: 'Dumbbell',
+        requirement_type: 'str',
+        requirement_value: 10
+      },
+      {
+        id: 'gold_1000',
+        title_en: 'Gold Digger',
+        title_th: 'นักขุดทอง',
+        description_en: 'Collect 1,000 Gold',
+        description_th: 'สะสมทองครบ 1,000',
+        icon: 'Coins',
+        requirement_type: 'gold',
+        requirement_value: 1000
+      }
+    ];
+
+    for (const ach of initialAchievements) {
+      await client.query(`
+        INSERT INTO achievements (id, title_en, title_th, description_en, description_th, icon, requirement_type, requirement_value)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (id) DO NOTHING
+      `, [ach.id, ach.title_en, ach.title_th, ach.description_en, ach.description_th, ach.icon, ach.requirement_type, ach.requirement_value]);
+    }
+
+    console.log("Database initialized successfully");
+  } catch (err) {
+    console.error("Database initialization error:", err);
+  } finally {
+    client.release();
+  }
 }
 
 async function startServer() {
+  await initDb();
+
   const app = express();
   const PORT = parseInt(process.env.PORT || "3000");
   const JWT_SECRET = process.env.JWT_SECRET || "slayer-secret-key";
@@ -158,27 +141,24 @@ async function startServer() {
   app.use(cors({ origin: true, credentials: true }));
 
   // Helper: Create Player
-    const createPlayer = (userId: number, name: string, gender: string = 'Male') => {
-    const stmt = db.prepare(`
+  const createPlayer = async (userId: number, name: string, gender: string = 'Male') => {
+    await pool.query(`
       INSERT INTO players (id, name, gender, level, exp, hp, max_hp, gold, gems, weapon, str, dex, vit, stat_points, language, created_at)
-      VALUES (?, ?, ?, 1, 0, 100, 100, 500, 50, 'Wooden Sword', 1, 1, 1, 5, 'EN', CURRENT_TIMESTAMP)
-    `);
-    stmt.run(userId, name, gender);
+      VALUES ($1, $2, $3, 1, 0, 100, 100, 500, 50, 'Wooden Sword', 1, 1, 1, 5, 'EN', CURRENT_TIMESTAMP)
+    `, [userId, name, gender]);
   };
 
   // Discord Bot Initialization
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  const discordClient = new Client({ intents: [GatewayIntentBits.Guilds] });
   const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
   if (DISCORD_BOT_TOKEN) {
-    client.once('ready', () => {
-      console.log(`Logged in as ${client.user?.tag}!`);
+    discordClient.once('ready', () => {
+      console.log(`Logged in as ${discordClient.user?.tag}!`);
     });
-    client.login(DISCORD_BOT_TOKEN).catch(err => {
+    discordClient.login(DISCORD_BOT_TOKEN).catch(err => {
       console.error("Discord Bot Login Error:", err);
     });
-  } else {
-    console.warn("DISCORD_BOT_TOKEN not found. Discord bot will not start.");
   }
 
   // Auth Middleware
@@ -193,29 +173,27 @@ async function startServer() {
     });
   };
 
-  // --- API ROUTES ---
-
   // Register
   app.post("/api/auth/register", async (req, res) => {
     const { username, password, gender } = req.body;
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
-      const stmt = db.prepare("INSERT INTO users (username, password) VALUES (?, ?)");
-      const result = stmt.run(username, hashedPassword);
-      const userId = result.lastInsertRowid as number;
+      const result = await pool.query("INSERT INTO users (username, password) VALUES ($1, $2) RETURNING id", [username, hashedPassword]);
+      const userId = result.rows[0].id;
 
-      createPlayer(userId, username, gender);
+      await createPlayer(userId, username, gender);
 
       res.json({ success: true });
     } catch (error: any) {
-      res.status(400).json({ error: error.message.includes("UNIQUE") ? "Username already exists" : "Registration failed" });
+      res.status(400).json({ error: error.message.includes("unique") ? "Username already exists" : "Registration failed" });
     }
   });
 
   // Login
   app.post("/api/auth/login", async (req, res) => {
     const { username, password } = req.body;
-    const user: any = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+    const result = await pool.query("SELECT * FROM users WHERE username = $1", [username]);
+    const user = result.rows[0];
 
     if (user && user.password && await bcrypt.compare(password, user.password)) {
       const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "24h" });
@@ -233,13 +211,13 @@ async function startServer() {
   });
 
   // Get Current User/Player
-  app.get("/api/me", authenticateToken, (req: any, res) => {
-    const player = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+  app.get("/api/me", authenticateToken, async (req: any, res) => {
+    const result = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    let player = result.rows[0];
     if (!player) {
-      // Auto-create if missing (shouldn't happen with normal flow but good for robustness)
-      createPlayer(req.user.id, req.user.username);
-      const newPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
-      return res.json({ user: req.user, player: newPlayer });
+      await createPlayer(req.user.id, req.user.username);
+      const newResult = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+      player = newResult.rows[0];
     }
     res.json({ user: req.user, player });
   });
@@ -247,74 +225,76 @@ async function startServer() {
   // Update Stats (Training)
   app.post("/api/player/train", authenticateToken, async (req: any, res) => {
     const { str, dex, vit, pointsSpent } = req.body;
-    const player: any = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    const result = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    const player = result.rows[0];
 
     if (!player || player.stat_points < pointsSpent) {
       return res.status(400).json({ error: "Insufficient stat points" });
     }
 
     const newMaxHp = 100 + ((player.vit + vit) * 10);
-    const stmt = db.prepare(`
+    await pool.query(`
       UPDATE players 
-      SET str = str + ?, dex = dex + ?, vit = vit + ?, stat_points = stat_points - ?, max_hp = ?, last_save = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
-    stmt.run(str, dex, vit, pointsSpent, newMaxHp, req.user.id);
+      SET str = str + $1, dex = dex + $2, vit = vit + $3, stat_points = stat_points - $4, max_hp = $5, last_save = CURRENT_TIMESTAMP
+      WHERE id = $6
+    `, [str, dex, vit, pointsSpent, newMaxHp, req.user.id]);
 
-    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
-    res.json({ success: true, player: updatedPlayer });
+    const updatedResult = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    res.json({ success: true, player: updatedResult.rows[0] });
   });
 
   // Manual Save
-  app.post("/api/player/save", authenticateToken, (req: any, res) => {
-    db.prepare("UPDATE players SET last_save = CURRENT_TIMESTAMP WHERE id = ?").run(req.user.id);
-    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
-    res.json({ success: true, player: updatedPlayer });
+  app.post("/api/player/save", authenticateToken, async (req: any, res) => {
+    await pool.query("UPDATE players SET last_save = CURRENT_TIMESTAMP WHERE id = $1", [req.user.id]);
+    const updatedResult = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    res.json({ success: true, player: updatedResult.rows[0] });
   });
 
   // Update Settings
-  app.post("/api/player/settings", authenticateToken, (req: any, res) => {
+  app.post("/api/player/settings", authenticateToken, async (req: any, res) => {
     const { language, theme_color } = req.body;
     if (language) {
-      db.prepare("UPDATE players SET language = ? WHERE id = ?").run(language, req.user.id);
+      await pool.query("UPDATE players SET language = $1 WHERE id = $2", [language, req.user.id]);
     }
     if (theme_color) {
-      db.prepare("UPDATE players SET theme_color = ? WHERE id = ?").run(theme_color, req.user.id);
+      await pool.query("UPDATE players SET theme_color = $1 WHERE id = $2", [theme_color, req.user.id]);
     }
-    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
-    res.json({ success: true, player: updatedPlayer });
+    const updatedResult = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    res.json({ success: true, player: updatedResult.rows[0] });
   });
 
   // Update Username
-  app.post("/api/player/update-name", authenticateToken, (req: any, res) => {
+  app.post("/api/player/update-name", authenticateToken, async (req: any, res) => {
     const { name } = req.body;
     if (!name || name.trim().length < 2) {
       return res.status(400).json({ error: "Name must be at least 2 characters long" });
     }
-    db.prepare("UPDATE players SET name = ? WHERE id = ?").run(name.trim(), req.user.id);
-    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
-    res.json({ success: true, player: updatedPlayer });
+    await pool.query("UPDATE players SET name = $1 WHERE id = $2", [name.trim(), req.user.id]);
+    const updatedResult = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    res.json({ success: true, player: updatedResult.rows[0] });
   });
 
   // Get Achievements
-  app.get("/api/achievements", authenticateToken, (req: any, res) => {
-    const achievements = db.prepare("SELECT * FROM achievements").all();
-    const unlocked = db.prepare("SELECT achievement_id FROM player_achievements WHERE player_id = ?").all(req.user.id);
-    const unlockedIds = unlocked.map((u: any) => u.achievement_id);
+  app.get("/api/achievements", authenticateToken, async (req: any, res) => {
+    const achievementsResult = await pool.query("SELECT * FROM achievements");
+    const unlockedResult = await pool.query("SELECT achievement_id FROM player_achievements WHERE player_id = $1", [req.user.id]);
+    const unlockedIds = unlockedResult.rows.map((u: any) => u.achievement_id);
     
-    res.json({ achievements, unlockedIds });
+    res.json({ achievements: achievementsResult.rows, unlockedIds });
   });
 
   // Check and Unlock Achievements
-  app.post("/api/player/check-achievements", authenticateToken, (req: any, res) => {
-    const player: any = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
-    const achievements: any = db.prepare("SELECT * FROM achievements").all();
-    const unlocked: any = db.prepare("SELECT achievement_id FROM player_achievements WHERE player_id = ?").all(req.user.id);
-    const unlockedIds = unlocked.map((u: any) => u.achievement_id);
+  app.post("/api/player/check-achievements", authenticateToken, async (req: any, res) => {
+    const playerResult = await pool.query("SELECT * FROM players WHERE id = $1", [req.user.id]);
+    const player = playerResult.rows[0];
+    const achievementsResult = await pool.query("SELECT * FROM achievements");
+    const achievements = achievementsResult.rows;
+    const unlockedResult = await pool.query("SELECT achievement_id FROM player_achievements WHERE player_id = $1", [req.user.id]);
+    const unlockedIds = unlockedResult.rows.map((u: any) => u.achievement_id);
 
     const newlyUnlocked: any[] = [];
 
-    achievements.forEach((ach: any) => {
+    for (const ach of achievements) {
       if (!unlockedIds.includes(ach.id)) {
         let isMet = false;
         if (ach.requirement_type === 'level' && player.level >= ach.requirement_value) isMet = true;
@@ -322,11 +302,11 @@ async function startServer() {
         if (ach.requirement_type === 'gold' && player.gold >= ach.requirement_value) isMet = true;
 
         if (isMet) {
-          db.prepare("INSERT INTO player_achievements (player_id, achievement_id) VALUES (?, ?)").run(req.user.id, ach.id);
+          await pool.query("INSERT INTO player_achievements (player_id, achievement_id) VALUES ($1, $2)", [req.user.id, ach.id]);
           newlyUnlocked.push(ach);
         }
       }
-    });
+    }
 
     res.json({ success: true, newlyUnlocked });
   });
@@ -337,15 +317,9 @@ async function startServer() {
     const redirectUri = process.env.DISCORD_REDIRECT_URI || (process.env.APP_URL ? `${process.env.APP_URL}/api/auth/discord/callback` : null);
     
     if (!clientId) {
-      console.error("Discord Auth Error: DISCORD_CLIENT_ID is missing");
-      return res.status(400).json({ error: "Discord Client ID is not configured in environment variables." });
+      return res.status(400).json({ error: "Discord Client ID is not configured." });
     }
-    if (!redirectUri) {
-      console.error("Discord Auth Error: Redirect URI could not be determined");
-      return res.status(400).json({ error: "Discord Redirect URI is not configured and APP_URL is missing." });
-    }
-
-    const url = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify`;
+    const url = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri!)}&response_type=code&scope=identify`;
     res.json({ url });
   });
 
@@ -358,37 +332,28 @@ async function startServer() {
     const clientSecret = process.env.DISCORD_CLIENT_SECRET;
     const redirectUri = process.env.DISCORD_REDIRECT_URI || (process.env.APP_URL ? `${process.env.APP_URL}/api/auth/discord/callback` : null);
 
-    if (!clientId || !clientSecret || !redirectUri) {
-      console.error("Discord Callback Error: Missing configuration", { clientId: !!clientId, clientSecret: !!clientSecret, redirectUri: !!redirectUri });
-      return res.status(500).send("Discord configuration is incomplete.");
-    }
-
     try {
-      // Exchange code for token
       const tokenResponse = await axios.post("https://discord.com/api/oauth2/token", new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
+        client_id: clientId!,
+        client_secret: clientSecret!,
         grant_type: "authorization_code",
         code: code as string,
-        redirect_uri: redirectUri,
+        redirect_uri: redirectUri!,
       }), { headers: { "Content-Type": "application/x-www-form-urlencoded" } });
 
       const { access_token } = tokenResponse.data;
-
-      // Get user info
       const userResponse = await axios.get("https://discord.com/api/users/@me", {
         headers: { Authorization: `Bearer ${access_token}` }
       });
 
       const discordUser = userResponse.data;
-      let user: any = db.prepare("SELECT * FROM users WHERE discord_id = ?").get(discordUser.id);
+      const userResult = await pool.query("SELECT * FROM users WHERE discord_id = $1", [discordUser.id]);
+      let user = userResult.rows[0];
 
       if (!user) {
-        // Create new user via Discord
-        const stmt = db.prepare("INSERT INTO users (username, discord_id) VALUES (?, ?)");
-        const result = stmt.run(discordUser.username, discordUser.id);
-        user = { id: result.lastInsertRowid, username: discordUser.username };
-        createPlayer(user.id, discordUser.username);
+        const insertResult = await pool.query("INSERT INTO users (username, discord_id) VALUES ($1, $2) RETURNING id", [discordUser.username, discordUser.id]);
+        user = { id: insertResult.rows[0].id, username: discordUser.username };
+        await createPlayer(user.id, discordUser.username);
       }
 
       const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "24h" });
