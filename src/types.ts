@@ -21,9 +21,21 @@ export interface Player {
   last_save?: string;
   language?: Language;
   created_at?: string;
+  theme_color?: string;
 }
 
 export type Language = 'EN' | 'TH';
+
+export interface Achievement {
+  id: string;
+  title_en: string;
+  title_th: string;
+  description_en: string;
+  description_th: string;
+  icon: string;
+  requirement_type: string;
+  requirement_value: number;
+}
 
 export interface Translation {
   dashboard: string;
@@ -61,4 +73,15 @@ export interface Translation {
   joined: string;
   stats: string;
   equipment: string;
+  achievements: string;
+  edit: string;
+  update: string;
+  unlocked: string;
+  locked: string;
+  newAchievement: string;
+  theme: string;
+  selectTheme: string;
+  betaTester: string;
+  settings: string;
+  customColor: string;
 }

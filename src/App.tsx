@@ -19,11 +19,87 @@ import {
   MessageSquare,
   Save,
   Menu,
-  X
+  X,
+  Trophy,
+  CheckCircle2,
+  AlertCircle,
+  Edit2,
+  Settings as SettingsIcon,
+  Palette
 } from 'lucide-react';
 import axios from 'axios';
-import { User, Player, Language } from './types';
+import { User, Player, Language, Achievement } from './types';
 import { translations } from './translations';
+
+// --- NOTIFICATION SYSTEM ---
+interface Notification {
+  id: string;
+  title: string;
+  message: string;
+  type: 'success' | 'error' | 'achievement';
+  icon?: React.ReactNode;
+}
+
+const NotificationContext = createContext<{
+  notify: (n: Omit<Notification, 'id'>) => void;
+}>({ notify: () => {} });
+
+export const useNotification = () => useContext(NotificationContext);
+
+const NotificationProvider = ({ children }: { children: React.ReactNode }) => {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const notify = (n: Omit<Notification, 'id'>) => {
+    const id = Math.random().toString(36).substr(2, 9);
+    setNotifications(prev => [...prev, { ...n, id }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(notif => notif.id !== id));
+    }, 5000);
+  };
+
+  return (
+    <NotificationContext.Provider value={{ notify }}>
+      {children}
+      <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-3 pointer-events-none">
+        <AnimatePresence>
+          {notifications.map(n => (
+            <motion.div
+              key={n.id}
+              initial={{ opacity: 0, x: 50, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 20, scale: 0.9 }}
+              className={`pointer-events-auto w-80 p-4 rounded-2xl border shadow-2xl backdrop-blur-xl flex gap-4 ${
+                n.type === 'achievement' 
+                  ? 'bg-accent/20 border-accent/30 text-accent' 
+                  : n.type === 'error'
+                  ? 'bg-red-500/20 border-red-500/30 text-red-400'
+                  : 'bg-neutral-900/90 border-white/10 text-white'
+              }`}
+            >
+              <div className="flex-shrink-0 mt-1">
+                {n.icon || (
+                  n.type === 'achievement' ? <Trophy size={20} /> :
+                  n.type === 'error' ? <AlertCircle size={20} /> :
+                  <CheckCircle2 size={20} className="text-green-400" />
+                )}
+              </div>
+              <div className="flex-1">
+                <div className="text-sm font-bold uppercase tracking-tight">{n.title}</div>
+                <div className="text-xs opacity-70 mt-0.5 leading-relaxed">{n.message}</div>
+              </div>
+              <button 
+                onClick={() => setNotifications(prev => prev.filter(notif => notif.id !== n.id))}
+                className="opacity-40 hover:opacity-100 transition-opacity self-start"
+              >
+                <X size={14} />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </NotificationContext.Provider>
+  );
+};
 
 // --- Contexts ---
 interface AuthContextType {
@@ -35,8 +111,11 @@ interface AuthContextType {
   refreshData: () => Promise<void>;
   lang: Language;
   setLang: (l: Language) => void;
-  activePage: 'dashboard' | 'status' | 'profile';
-  setActivePage: (p: 'dashboard' | 'status' | 'profile') => void;
+  activePage: 'dashboard' | 'status' | 'profile' | 'settings';
+  setActivePage: (p: 'dashboard' | 'status' | 'profile' | 'settings') => void;
+  updateName: (name: string) => Promise<void>;
+  checkAchievements: () => Promise<void>;
+  updateTheme: (color: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -75,7 +154,7 @@ const StatCard = ({ icon: Icon, label, value, subValue, color = "text-white" }: 
 );
 
 const Sidebar = () => {
-  const { logout, lang, setLang, player, activePage, setActivePage, refreshData } = useAuth();
+  const { logout, lang, setLang, player, activePage, setActivePage, refreshData, checkAchievements } = useAuth();
   const t = translations[lang];
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -85,6 +164,7 @@ const Sidebar = () => {
     try {
       await axios.post('/api/player/save');
       await refreshData();
+      await checkAchievements();
       setSaveStatus('saved');
       setTimeout(() => setSaveStatus('idle'), 2000);
     } catch (error) {
@@ -97,9 +177,10 @@ const Sidebar = () => {
     { id: 'dashboard', label: t.dashboard, icon: LayoutDashboard },
     { id: 'status', label: t.training, icon: Dumbbell },
     { id: 'profile', label: t.profile, icon: UserIcon },
+    { id: 'settings', label: t.settings, icon: SettingsIcon },
   ];
 
-  const handleNavClick = (page: 'dashboard' | 'status' | 'profile') => {
+  const handleNavClick = (page: 'dashboard' | 'status' | 'profile' | 'settings') => {
     setActivePage(page);
     setIsMenuOpen(false);
   };
@@ -116,27 +197,16 @@ const Sidebar = () => {
         </div>
 
         <nav className="flex-1 flex flex-col gap-2">
-          <button 
-            onClick={() => setActivePage('dashboard')}
-            className={`flex items-center gap-3 p-3 rounded-lg transition-all ${activePage === 'dashboard' ? 'bg-white/5 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}
-          >
-            <LayoutDashboard size={20} className={activePage === 'dashboard' ? 'text-accent' : ''} />
-            <span className="font-medium">{t.dashboard}</span>
-          </button>
-          <button 
-            onClick={() => setActivePage('status')}
-            className={`flex items-center gap-3 p-3 rounded-lg transition-all ${activePage === 'status' ? 'bg-white/5 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}
-          >
-            <Dumbbell size={20} className={activePage === 'status' ? 'text-accent' : ''} />
-            <span className="font-medium">{t.training}</span>
-          </button>
-          <button 
-            onClick={() => setActivePage('profile')}
-            className={`flex items-center gap-3 p-3 rounded-lg transition-all ${activePage === 'profile' ? 'bg-white/5 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}
-          >
-            <UserIcon size={20} className={activePage === 'profile' ? 'text-accent' : ''} />
-            <span className="font-medium">{t.profile}</span>
-          </button>
+          {navItems.map(item => (
+            <button 
+              key={item.id}
+              onClick={() => handleNavClick(item.id as any)}
+              className={`flex items-center gap-3 p-3 rounded-lg transition-all ${activePage === item.id ? 'bg-white/5 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}
+            >
+              <item.icon size={20} className={activePage === item.id ? 'text-accent' : ''} />
+              <span className="font-medium">{item.label}</span>
+            </button>
+          ))}
         </nav>
 
         <div className="mt-auto flex flex-col gap-4">
@@ -361,23 +431,21 @@ const Dashboard = () => {
             )}
           </div>
         </div>
-        <div className="flex gap-2 lg:gap-3 w-full md:w-auto">
-          <div className="flex-1 md:flex-none flex items-center justify-center gap-2 px-3 sm:px-4 py-2 bg-yellow-500/10 rounded-full border border-yellow-500/20">
-            <Coins size={14} className="text-yellow-500 sm:w-4 sm:h-4" />
-            <span className="font-mono font-bold text-yellow-500 text-sm sm:text-base">{player.gold}</span>
-          </div>
-          <div className="flex-1 md:flex-none flex items-center justify-center gap-2 px-3 sm:px-4 py-2 bg-blue-500/10 rounded-full border border-blue-500/20">
-            <Gem size={14} className="text-blue-500 sm:w-4 sm:h-4" />
-            <span className="font-mono font-bold text-blue-500 text-sm sm:text-base">{player.gems}</span>
-          </div>
+        <div className="flex items-center gap-2 px-4 py-2 bg-accent/10 rounded-full border border-accent/20">
+          <AlertCircle size={14} className="text-accent" />
+          <span className="text-[10px] sm:text-xs font-bold text-accent uppercase tracking-wider">
+            {t.betaTester}
+          </span>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-6 mb-8">
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 lg:gap-6 mb-8">
         <StatCard icon={Heart} label={t.hp} value={`${player.hp}/${player.max_hp}`} color="text-green-500" />
         <StatCard icon={Sword} label={t.damage} value={damage} color="text-accent" />
         <StatCard icon={Shield} label={t.maxHp} value={player.max_hp} color="text-blue-500" />
         <StatCard icon={Zap} label={t.exp} value={player.exp} subValue={`Next: ${player.level * 100}`} color="text-yellow-500" />
+        <StatCard icon={Coins} label={t.gold} value={player.gold} color="text-yellow-500" />
+        <StatCard icon={Gem} label={t.gems} value={player.gems} color="text-blue-500" />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:gap-8">
@@ -460,7 +528,7 @@ const StatusPage = () => {
 };
 
 const TrainingSection = () => {
-  const { player, lang, refreshData } = useAuth();
+  const { player, lang, refreshData, checkAchievements } = useAuth();
   const t = translations[lang];
   const [pendingStats, setPendingStats] = useState({ str: 0, dex: 0, vit: 0 });
   const [loading, setLoading] = useState(false);
@@ -482,6 +550,7 @@ const TrainingSection = () => {
     try {
       await axios.post('/api/player/train', { ...pendingStats, pointsSpent: totalSpent });
       await refreshData();
+      await checkAchievements();
       setPendingStats({ str: 0, dex: 0, vit: 0 });
     } catch (error) {
       console.error("Training error:", error);
@@ -714,10 +783,40 @@ const AuthScreen = () => {
 // --- Provider ---
 
 export const ProfilePage = () => {
-  const { player, lang } = useAuth();
+  const { player, lang, updateName, checkAchievements, updateTheme } = useAuth();
   const t = translations[lang];
+  const [isEditing, setIsEditing] = useState(false);
+  const [newName, setNewName] = useState(player?.name || '');
+  const [achievements, setAchievements] = useState<Achievement[]>([]);
+  const [unlockedIds, setUnlockedIds] = useState<string[]>([]);
+  const [loadingAchievements, setLoadingAchievements] = useState(true);
+
+  useEffect(() => {
+    const fetchAchievements = async () => {
+      try {
+        const res = await axios.get('/api/achievements');
+        setAchievements(res.data.achievements);
+        setUnlockedIds(res.data.unlockedIds);
+      } catch (err) {
+        console.error("Failed to fetch achievements:", err);
+      } finally {
+        setLoadingAchievements(false);
+      }
+    };
+    fetchAchievements();
+    checkAchievements();
+  }, []);
 
   if (!player) return null;
+
+  const handleSaveName = async () => {
+    try {
+      await updateName(newName);
+      setIsEditing(false);
+    } catch (err) {
+      // Error handled in updateName
+    }
+  };
 
   const totalStats = player.str + player.dex + player.vit;
   const joinDate = player.created_at ? new Date(player.created_at).toLocaleDateString(lang === 'TH' ? 'th-TH' : 'en-US', {
@@ -737,13 +836,47 @@ export const ProfilePage = () => {
         <p className="text-white/50 text-sm mt-1">Slayer identity and history.</p>
       </div>
 
-      <div className="max-w-3xl mx-auto w-full space-y-6">
+      <div className="max-w-4xl mx-auto w-full space-y-6">
         <div className="card-gradient p-6 sm:p-10 flex flex-col sm:flex-row items-center gap-8">
           <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-3xl bg-accent/10 border border-accent/20 flex items-center justify-center text-accent shadow-2xl shadow-accent/10">
-            <UserIcon size={48} sm:size={64} />
+            <UserIcon size={48} />
           </div>
-          <div className="text-center sm:text-left flex-1">
-            <h3 className="text-3xl sm:text-4xl font-bold tracking-tighter mb-2">{player.name}</h3>
+          <div className="text-center sm:text-left flex-1 w-full">
+            {isEditing ? (
+              <div className="flex flex-col sm:flex-row items-center gap-3 mb-4">
+                <input 
+                  type="text"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-2xl font-bold focus:outline-none focus:border-accent/50 w-full sm:w-auto"
+                  autoFocus
+                />
+                <div className="flex gap-2">
+                  <button 
+                    onClick={handleSaveName}
+                    className="bg-accent text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-accent/80 transition-all"
+                  >
+                    {t.update}
+                  </button>
+                  <button 
+                    onClick={() => { setIsEditing(false); setNewName(player.name); }}
+                    className="bg-white/5 text-white/60 px-4 py-2 rounded-xl font-bold text-sm hover:bg-white/10 transition-all"
+                  >
+                    {t.cancel}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center sm:justify-start gap-4 mb-2">
+                <h3 className="text-3xl sm:text-4xl font-bold tracking-tighter">{player.name}</h3>
+                <button 
+                  onClick={() => setIsEditing(true)}
+                  className="p-2 rounded-lg bg-white/5 text-white/40 hover:text-white hover:bg-white/10 transition-all"
+                >
+                  <Edit2 size={16} />
+                </button>
+              </div>
+            )}
             <div className="flex flex-wrap justify-center sm:justify-start gap-3">
               <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-mono uppercase opacity-60">
                 {player.gender === 'Male' ? t.male : t.female}
@@ -809,6 +942,153 @@ export const ProfilePage = () => {
             </div>
           </div>
         </div>
+
+        <div className="card-gradient p-6">
+          <h4 className="text-xs font-mono uppercase opacity-40 mb-6 tracking-widest flex items-center gap-2">
+            <Trophy size={14} className="text-accent" /> {t.achievements}
+          </h4>
+          {loadingAchievements ? (
+            <div className="flex justify-center p-8">
+              <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {achievements.map(ach => {
+                const isUnlocked = unlockedIds.includes(ach.id);
+                return (
+                  <div 
+                    key={ach.id}
+                    className={`p-4 rounded-2xl border transition-all flex items-center gap-4 ${
+                      isUnlocked 
+                        ? 'bg-accent/5 border-accent/20' 
+                        : 'bg-white/5 border-white/5 opacity-40 grayscale'
+                    }`}
+                  >
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                      isUnlocked ? 'bg-accent/20 text-accent' : 'bg-white/5 text-white/40'
+                    }`}>
+                      {ach.icon === 'Sword' ? <Sword size={20} /> : 
+                       ach.icon === 'Dumbbell' ? <Dumbbell size={20} /> : 
+                       <Coins size={20} />}
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold">{lang === 'TH' ? ach.title_th : ach.title_en}</div>
+                      <div className="text-[10px] opacity-60 leading-tight mt-0.5">
+                        {lang === 'TH' ? ach.description_th : ach.description_en}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+};
+
+const SettingsPage = () => {
+  const { player, lang, updateTheme, setLang } = useAuth();
+  const t = translations[lang];
+  const [customColor, setCustomColor] = useState(player?.theme_color || '#ef4444');
+
+  if (!player) return null;
+
+  const themeColors = [
+    { name: 'Default Red', color: '#ef4444' },
+    { name: 'Royal Purple', color: '#a855f7' },
+    { name: 'Emerald Green', color: '#10b981' },
+    { name: 'Ocean Blue', color: '#3b82f6' },
+    { name: 'Golden Sun', color: '#f59e0b' },
+    { name: 'Pink Rose', color: '#ec4899' },
+  ];
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="p-4 lg:p-8 flex-1 overflow-y-auto pb-24 lg:pb-8"
+    >
+      <div className="mb-8">
+        <h2 className="text-2xl lg:text-3xl font-bold tracking-tight">{t.settings}</h2>
+        <p className="text-white/50 text-sm mt-1">Manage your preferences and interface.</p>
+      </div>
+
+      <div className="max-w-3xl mx-auto w-full space-y-6">
+        <div className="card-gradient p-6">
+          <h4 className="text-xs font-mono uppercase opacity-40 mb-6 tracking-widest flex items-center gap-2">
+            <Globe size={14} className="text-accent" /> Language
+          </h4>
+          <div className="flex gap-4">
+            <button 
+              onClick={() => setLang('EN')}
+              className={`flex-1 p-4 rounded-xl border transition-all font-bold ${lang === 'EN' ? 'bg-accent/10 border-accent/20 text-accent' : 'bg-white/5 border-white/5 text-white/40 hover:bg-white/10'}`}
+            >
+              English
+            </button>
+            <button 
+              onClick={() => setLang('TH')}
+              className={`flex-1 p-4 rounded-xl border transition-all font-bold ${lang === 'TH' ? 'bg-accent/10 border-accent/20 text-accent' : 'bg-white/5 border-white/5 text-white/40 hover:bg-white/10'}`}
+            >
+              ภาษาไทย
+            </button>
+          </div>
+        </div>
+
+        <div className="card-gradient p-6">
+          <h4 className="text-xs font-mono uppercase opacity-40 mb-6 tracking-widest flex items-center gap-2">
+            <Palette size={14} className="text-accent" /> {t.theme}
+          </h4>
+          <div className="space-y-6">
+            <div>
+              <p className="text-xs text-white/40 mb-4">{t.selectTheme}</p>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+                {themeColors.map((theme) => (
+                  <button
+                    key={theme.color}
+                    onClick={() => { updateTheme(theme.color); setCustomColor(theme.color); }}
+                    className={`h-12 rounded-xl border-2 transition-all flex items-center justify-center ${
+                      player.theme_color === theme.color
+                        ? 'border-white scale-105 shadow-lg'
+                        : 'border-transparent hover:border-white/20'
+                    }`}
+                    style={{ backgroundColor: theme.color }}
+                    title={theme.name}
+                  >
+                    {player.theme_color === theme.color && (
+                      <CheckCircle2 size={20} className="text-white drop-shadow-md" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="pt-6 border-t border-white/5">
+              <p className="text-xs text-white/40 mb-4">{t.customColor}</p>
+              <div className="flex items-center gap-4">
+                <input 
+                  type="color" 
+                  value={customColor}
+                  onChange={(e) => setCustomColor(e.target.value)}
+                  className="w-12 h-12 rounded-xl bg-transparent border-none cursor-pointer"
+                />
+                <input 
+                  type="text"
+                  value={customColor}
+                  onChange={(e) => setCustomColor(e.target.value)}
+                  className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 font-mono text-sm focus:outline-none focus:border-accent/50 flex-1"
+                />
+                <button 
+                  onClick={() => updateTheme(customColor)}
+                  className="bg-accent text-white px-6 py-2 rounded-xl font-bold text-sm hover:bg-accent/80 transition-all"
+                >
+                  {t.confirm}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </motion.div>
   );
@@ -819,7 +1099,17 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [player, setPlayer] = useState<Player | null>(null);
   const [loading, setLoading] = useState(true);
   const [lang, setLang] = useState<Language>('EN');
-  const [activePage, setActivePage] = useState<'dashboard' | 'status' | 'profile'>('dashboard');
+  const [activePage, setActivePage] = useState<'dashboard' | 'status' | 'profile' | 'settings'>('dashboard');
+  const { notify } = useNotification();
+  const t = translations[lang];
+
+  useEffect(() => {
+    if (player?.theme_color) {
+      document.documentElement.style.setProperty('--color-accent', player.theme_color);
+    } else {
+      document.documentElement.style.setProperty('--color-accent', '#ef4444');
+    }
+  }, [player?.theme_color]);
 
   const refreshData = async () => {
     try {
@@ -837,6 +1127,61 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  const checkAchievements = async () => {
+    try {
+      const res = await axios.post('/api/player/check-achievements');
+      if (res.data.newlyUnlocked && res.data.newlyUnlocked.length > 0) {
+        res.data.newlyUnlocked.forEach((ach: Achievement) => {
+          notify({
+            title: t.newAchievement,
+            message: lang === 'TH' ? ach.title_th : ach.title_en,
+            type: 'achievement',
+            icon: <Trophy size={20} className="text-accent" />
+          });
+        });
+      }
+    } catch (err) {
+      console.error("Check achievements error:", err);
+    }
+  };
+
+  const updateName = async (name: string) => {
+    try {
+      const res = await axios.post('/api/player/update-name', { name });
+      setPlayer(res.data.player);
+      notify({
+        title: t.saved,
+        message: lang === 'TH' ? 'อัปเดตชื่อเรียบร้อยแล้ว' : 'Username updated successfully',
+        type: 'success'
+      });
+    } catch (err: any) {
+      notify({
+        title: 'Error',
+        message: err.response?.data?.error || 'Failed to update name',
+        type: 'error'
+      });
+      throw err;
+    }
+  };
+
+  const updateTheme = async (color: string) => {
+    try {
+      const res = await axios.post('/api/player/settings', { theme_color: color });
+      setPlayer(res.data.player);
+      notify({
+        title: t.saved,
+        message: lang === 'TH' ? 'อัปเดตธีมเรียบร้อยแล้ว' : 'Theme updated successfully',
+        type: 'success'
+      });
+    } catch (err: any) {
+      notify({
+        title: 'Error',
+        message: err.response?.data?.error || 'Failed to update theme',
+        type: 'error'
+      });
+    }
+  };
+
   useEffect(() => {
     refreshData();
   }, []);
@@ -850,6 +1195,7 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     await axios.post('/api/auth/logout');
     setUser(null);
     setPlayer(null);
+    setActivePage('dashboard');
   };
 
   const handleSetLang = async (newLang: Language) => {
@@ -864,7 +1210,10 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, player, loading, login, logout, refreshData, lang, setLang: handleSetLang, activePage, setActivePage }}>
+    <AuthContext.Provider value={{ 
+      user, player, loading, login, logout, refreshData, lang, setLang: handleSetLang, 
+      activePage, setActivePage, updateName, checkAchievements, updateTheme 
+    }}>
       {children}
     </AuthContext.Provider>
   );
@@ -874,9 +1223,11 @@ const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <NotificationProvider>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </NotificationProvider>
   );
 }
 
@@ -898,7 +1249,10 @@ function AppContent() {
       ) : (
         <>
           <Sidebar />
-          {activePage === 'dashboard' ? <Dashboard /> : activePage === 'status' ? <StatusPage /> : <ProfilePage />}
+          {activePage === 'dashboard' && <Dashboard />}
+          {activePage === 'status' && <StatusPage />}
+          {activePage === 'profile' && <ProfilePage />}
+          {activePage === 'settings' && <SettingsPage />}
         </>
       )}
     </div>

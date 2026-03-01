@@ -10,9 +10,22 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { Client, GatewayIntentBits } from "discord.js";
 
+import { fileURLToPath } from "url";
+import fs from "fs";
+
 dotenv.config();
 
-const db = new Database("game.db");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Database path setup for Railway persistence
+// If RAILWAY_VOLUME_MOUNT_PATH is set (e.g. to /data), use it.
+const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || ".";
+if (dataDir !== "." && !fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+const dbPath = path.join(dataDir, "game.db");
+const db = new Database(dbPath);
 
 // Initialize Database
 db.exec(`
@@ -43,7 +56,68 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS achievements (
+    id TEXT PRIMARY KEY,
+    title_en TEXT,
+    title_th TEXT,
+    description_en TEXT,
+    description_th TEXT,
+    icon TEXT,
+    requirement_type TEXT,
+    requirement_value INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS player_achievements (
+    player_id INTEGER,
+    achievement_id TEXT,
+    unlocked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(player_id, achievement_id),
+    FOREIGN KEY(player_id) REFERENCES players(id),
+    FOREIGN KEY(achievement_id) REFERENCES achievements(id)
+  );
 `);
+
+// Initial Achievements
+const initialAchievements = [
+  {
+    id: 'lvl_5',
+    title_en: 'Novice Slayer',
+    title_th: 'นักล่าฝึกหัด',
+    description_en: 'Reach Level 5',
+    description_th: 'เลเวลถึง 5',
+    icon: 'Sword',
+    requirement_type: 'level',
+    requirement_value: 5
+  },
+  {
+    id: 'str_10',
+    title_en: 'Brute Force',
+    title_th: 'พลังทำลายล้าง',
+    description_en: 'Reach 10 Strength',
+    description_th: 'ความแข็งแกร่งถึง 10',
+    icon: 'Dumbbell',
+    requirement_type: 'str',
+    requirement_value: 10
+  },
+  {
+    id: 'gold_1000',
+    title_en: 'Gold Digger',
+    title_th: 'นักขุดทอง',
+    description_en: 'Collect 1,000 Gold',
+    description_th: 'สะสมทองครบ 1,000',
+    icon: 'Coins',
+    requirement_type: 'gold',
+    requirement_value: 1000
+  }
+];
+
+initialAchievements.forEach(ach => {
+  db.prepare(`
+    INSERT OR IGNORE INTO achievements (id, title_en, title_th, description_en, description_th, icon, requirement_type, requirement_value)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(ach.id, ach.title_en, ach.title_th, ach.description_en, ach.description_th, ach.icon, ach.requirement_type, ach.requirement_value);
+});
 
 // Migration: Add last_save column if it doesn't exist
 try {
@@ -60,6 +134,11 @@ try {
   db.prepare("ALTER TABLE players ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP").run();
 } catch (e) {}
 
+// Migration: Add theme_color column if it doesn't exist
+try {
+  db.prepare("ALTER TABLE players ADD COLUMN theme_color TEXT DEFAULT '#ef4444'").run();
+} catch (e) {}
+
 // Migration: Update existing players to start at 1 if they were at the old default (10)
 // Or just update everyone to 1 as requested by the user for consistency.
 try {
@@ -71,7 +150,7 @@ try {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "3000");
   const JWT_SECRET = process.env.JWT_SECRET || "slayer-secret-key";
 
   app.use(express.json());
@@ -195,12 +274,61 @@ async function startServer() {
 
   // Update Settings
   app.post("/api/player/settings", authenticateToken, (req: any, res) => {
-    const { language } = req.body;
+    const { language, theme_color } = req.body;
     if (language) {
       db.prepare("UPDATE players SET language = ? WHERE id = ?").run(language, req.user.id);
     }
+    if (theme_color) {
+      db.prepare("UPDATE players SET theme_color = ? WHERE id = ?").run(theme_color, req.user.id);
+    }
     const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
     res.json({ success: true, player: updatedPlayer });
+  });
+
+  // Update Username
+  app.post("/api/player/update-name", authenticateToken, (req: any, res) => {
+    const { name } = req.body;
+    if (!name || name.trim().length < 2) {
+      return res.status(400).json({ error: "Name must be at least 2 characters long" });
+    }
+    db.prepare("UPDATE players SET name = ? WHERE id = ?").run(name.trim(), req.user.id);
+    const updatedPlayer = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    res.json({ success: true, player: updatedPlayer });
+  });
+
+  // Get Achievements
+  app.get("/api/achievements", authenticateToken, (req: any, res) => {
+    const achievements = db.prepare("SELECT * FROM achievements").all();
+    const unlocked = db.prepare("SELECT achievement_id FROM player_achievements WHERE player_id = ?").all(req.user.id);
+    const unlockedIds = unlocked.map((u: any) => u.achievement_id);
+    
+    res.json({ achievements, unlockedIds });
+  });
+
+  // Check and Unlock Achievements
+  app.post("/api/player/check-achievements", authenticateToken, (req: any, res) => {
+    const player: any = db.prepare("SELECT * FROM players WHERE id = ?").get(req.user.id);
+    const achievements: any = db.prepare("SELECT * FROM achievements").all();
+    const unlocked: any = db.prepare("SELECT achievement_id FROM player_achievements WHERE player_id = ?").all(req.user.id);
+    const unlockedIds = unlocked.map((u: any) => u.achievement_id);
+
+    const newlyUnlocked: any[] = [];
+
+    achievements.forEach((ach: any) => {
+      if (!unlockedIds.includes(ach.id)) {
+        let isMet = false;
+        if (ach.requirement_type === 'level' && player.level >= ach.requirement_value) isMet = true;
+        if (ach.requirement_type === 'str' && player.str >= ach.requirement_value) isMet = true;
+        if (ach.requirement_type === 'gold' && player.gold >= ach.requirement_value) isMet = true;
+
+        if (isMet) {
+          db.prepare("INSERT INTO player_achievements (player_id, achievement_id) VALUES (?, ?)").run(req.user.id, ach.id);
+          newlyUnlocked.push(ach);
+        }
+      }
+    });
+
+    res.json({ success: true, newlyUnlocked });
   });
 
   // Discord OAuth2 URL
